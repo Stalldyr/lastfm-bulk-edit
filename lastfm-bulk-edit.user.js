@@ -1,22 +1,21 @@
 // ==UserScript==
-// @name        Last.fm Bulk Edit
-// @namespace   https://github.com/RudeySH/lastfm-bulk-edit
-// @version     0.3.4
-// @author      Rudey
-// @description Bulk edit your scrobbles for any artist or album on Last.fm at once.
-// @license     GPL-3.0-or-later
-// @homepageURL https://github.com/RudeySH/lastfm-bulk-edit
-// @icon        https://www.last.fm/static/images/lastfm_avatar_twitter.png
-// @updateURL   https://raw.githubusercontent.com/RudeySH/lastfm-bulk-edit/master/lastfm-bulk-edit.user.js
-// @downloadURL https://raw.githubusercontent.com/RudeySH/lastfm-bulk-edit/master/lastfm-bulk-edit.user.js
-// @supportURL  https://github.com/RudeySH/lastfm-bulk-edit/issues
-// @match       https://www.last.fm/*
-// @require     https://cdnjs.cloudflare.com/ajax/libs/he/1.2.0/he.min.js
+// @name         Last.fm Library Cleaner
+// @namespace    http://tampermonkey.net/
+// @version      0.1
+// @description  Automatically finds and removes bad values from tags
+// @author       Stalldyr
+// @match        https://www.last.fm/*
+// @connect      http://ws.audioscrobbler.com/2.0/*
+// @include      http://ws.audioscrobbler.com/2.0/*
+// @icon         https://www.last.fm/static/images/lastfm_avatar_twitter.png
+// @grant        none
+// @require      http://ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js
+// @require      https://unpkg.com/metadata-filter@latest/dist/filter.min.js
 // ==/UserScript==
 
 'use strict';
 
-const namespace = 'lastfm-bulk-edit';
+const namespace = 'lastfm-library-cleaner';
 
 // use the top-right link to determine the current user
 const authLink = document.querySelector('a.auth-link');
@@ -25,13 +24,39 @@ if (!authLink) {
     return; // not logged in
 }
 
-const libraryURL = `${authLink.href}/library`;
+const API_KEY = "b22a39da4c2100b1d8210bbd8e714e2c";
+const USER = authLink.childNodes[0].alt;
+
+const libraryURL = `${authLink.href}/library/`;
+const settingsURL = 'https://www.last.fm/settings/subscription';
 
 // https://regex101.com/r/KwEMRx/1
 const albumRegExp = new RegExp(`^${libraryURL}/music(/\\+[^/]*)*(/[^+][^/]*){2}$`);
 const artistRegExp = new RegExp(`^${libraryURL}/music(/\\+[^/]*)*(/[^+][^/]*){1}$`);
 
 const domParser = new DOMParser();
+const filter = MetadataFilter.createSpotifyFilter();
+
+const cleanerSection = document.createElement('section');
+cleanerSection.setAttribute("id", "library-cleaner");
+cleanerSection.innerHTML = `<h2>Last.fm Library Cleaner</h2>
+    <p> Cleans the library of dirty tags such as 'Remaster'. Select wether you want to clean album or tracks:</p>
+    <iframe name="votar" style="display:none;"></iframe>
+    <form method="GET" data-edit-scrobble="" target="votar">
+        <input type="radio" id="album" name="method" value="album" checked>
+        <label for="album">Albums</label><br>
+        <input type="radio" id="track" name="method" value="track">
+        <label for="track">Tracks</label><br>
+        <label for="startDate">Start date (Optional):</label>
+        <input type="date" id="startDate" name="startDate">
+        <p>Filters:</p>
+        <input type="checkbox" id="Remastered" name="filter" value="Remastered" checked>
+        <label for="Remastered"> Remastered </label><br>
+        <button class="btn-primary buffer-standard">
+            Clean Library
+        </button>
+    </form>
+    `;
 
 const editScrobbleFormTemplate = document.createElement('template');
 editScrobbleFormTemplate.innerHTML = `
@@ -66,16 +91,20 @@ modalTemplate.innerHTML = `
 initialize();
 
 function initialize() {
+    if (!document.URL.startsWith(settingsURL)) {
+        return; // current page is not the user's library
+    }
     appendStyle();
-    appendEditScrobbleHeaderLinkAndMenuItems(document);
+    appendCleanerButton(document);
 
+    /*
     // use MutationObserver because Last.fm is a single-page application
-
+    // MutationObserver provides the ability to watch for changes being made to the DOM tree
     const observer = new MutationObserver(mutations => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node instanceof Element) {
-                    appendEditScrobbleHeaderLinkAndMenuItems(node);
+                    appendCleanerButton(node);
                 }
             }
         }
@@ -85,8 +114,68 @@ function initialize() {
         childList: true,
         subtree: true
     });
+    */
 }
 
+function appendCleanerButton(element){
+    const historySection = element.querySelector("#subscription-history");
+
+    const cleanerForm = cleanerSection.querySelector('form');
+    const cleanerButton = cleanerForm.querySelector('button');
+
+    cleanerButton.addEventListener('click', async event => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        cleanerForm.submit();
+
+        var params = addParams(cleanerForm);
+
+        const userMethod = extractMethod(cleanerForm);
+
+        const urlParams = new URLSearchParams(params).toString();
+        const url = new URL("https://ws.audioscrobbler.com/2.0/?" + urlParams);
+        //const url = new URL(libraryURL + "/" + methodType);
+
+        console.log(url.href);
+
+        const editForm = getEditScrobbleForm(url,userMethod);
+    });
+
+    historySection.insertAdjacentElement('afterend', cleanerSection);
+}
+
+function extractMethod(form){
+    var userMethod = {};
+    userMethod.type = form.method.value;
+    if (form.startDate.value == ""){
+        userMethod.range = `top${form.method.value}s`;
+    }
+    else {
+        userMethod.range = `recenttracks`;
+    }
+
+    return userMethod;
+}
+
+function addParams(form){
+    var params = {};
+    if (form.startDate.value == ""){
+        params.method = `user.gettop${form.method.value}s`;
+    }
+    else {
+        params.method = `user.getrecenttracks`;
+        params.from = String(Math.round(new Date(form.startDate.value).getTime()/1000));
+    }
+    params.api_key = API_KEY;
+    params.user = USER;
+    params.limit = '200';
+    params.format = 'json';
+
+    return params
+}
+
+//CSS style features
 function appendStyle() {
     const style = document.createElement('style');
 
@@ -129,64 +218,7 @@ function appendStyle() {
     document.head.appendChild(style);
 }
 
-function appendEditScrobbleHeaderLinkAndMenuItems(element) {
-    if (!document.URL.startsWith(libraryURL)) {
-        return; // current page is not the user's library
-    }
-
-    appendEditScrobbleHeaderLink(element);
-    appendEditScrobbleMenuItems(element);
-}
-
-function appendEditScrobbleHeaderLink(element) {
-    const header = element.querySelector('.library-header');
-
-    if (header === null) {
-        return; // current page does not contain the header we're looking for
-    }
-
-    const form = getEditScrobbleForm(document.URL);
-    const button = form.querySelector('button');
-
-    // replace submit button with a link
-
-    form.style.display = 'inline';
-    button.style.display = 'none';
-
-    const link = form.appendChild(document.createElement('a'));
-    link.href = 'javascript:void(0)';
-    link.role = 'button';
-    link.textContent = 'Edit scrobbles';
-    link.addEventListener('click', () => button.click());
-
-    header.insertAdjacentText('beforeend', ' · ');
-    header.insertAdjacentElement('beforeend', form);
-}
-
-function appendEditScrobbleMenuItems(element) {
-    const tables = element.querySelectorAll('table.chartlist');
-
-    for (const table of tables) {
-        for (const row of table.tBodies[0].rows) {
-            const link = row.querySelector('a.chartlist-count-bar-link');
-
-            if (!link) {
-                continue; // this is not an artist, album or track
-            }
-
-            const form = getEditScrobbleForm(link.href, row);
-
-            const editScrobbleMenuItem = document.createElement('li');
-            editScrobbleMenuItem.appendChild(form);
-
-            // append new menu item to the DOM
-            const menu = row.querySelector('.chartlist-more-menu');
-            menu.insertBefore(editScrobbleMenuItem, menu.firstElementChild);
-        }
-    }
-}
-
-function getEditScrobbleForm(url, row) {
+async function getEditScrobbleForm(url,method) {
     const urlType = getUrlType(url);
 
     const form = editScrobbleFormTemplate.content.cloneNode(true).querySelector('form');
@@ -196,80 +228,66 @@ function getEditScrobbleForm(url, row) {
     let scrobbleData;
     let submit = false;
 
-    button.addEventListener('click', async event => {
-        if (!submit) {
-            event.stopImmediatePropagation();
-            return;
-        }
+    if (submit) {
+        return;
+    }
 
-        const loadingModal = createLoadingModal('Waiting for Last.fm...');
-        await augmentEditScrobbleForm(urlType, scrobbleData);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    if (!allScrobbleData) {
+        const loadingModal = createLoadingModal('Loading Scrobbles...', { display: 'percentage' });
+        allScrobbleData = await fetchScrobbleData(url,method, loadingModal);
         loadingModal.hide();
+    }
 
-        submit = false;
-    });
+    scrobbleData = allScrobbleData;
 
-    form.addEventListener('submit', async event => {
-        if (submit) {
-            return;
-        }
+    // use JSON strings as album keys to uniquely identify combinations of album + album artists
+    // group scrobbles by album key
+    let scrobbleDataGroups = [...groupBy(allScrobbleData, s => JSON.stringify({
+        album_name: s.get('album_name') || '',
+        album_artist_name: s.get('album_artist_name') || ''
+    }))];
 
-        event.preventDefault();
-        event.stopImmediatePropagation();
+    // sort groups by the amount of scrobbles
+    scrobbleDataGroups = scrobbleDataGroups.sort(([_key1, values1], [_key2, values2]) => values2.length - values1.length);
 
-        if (!allScrobbleData) {
-            const loadingModal = createLoadingModal('Loading Scrobbles...', { display: 'percentage' });
-            allScrobbleData = await fetchScrobbleData(url, loadingModal);
-            loadingModal.hide();
-        }
+    // when editing multiple albums album, show an album selection dialog first
+    if (scrobbleDataGroups.length >= 2) {
+        const noAlbumKey = JSON.stringify({ album_name: '', album_artist_name: '' });
+        let currentAlbumKey = undefined;
 
-        scrobbleData = allScrobbleData;
+        // put the "No Album" album first
+        scrobbleDataGroups = scrobbleDataGroups.sort(([key1], [key2]) => {
+            if (key1 === noAlbumKey) return -1;
+            if (key2 === noAlbumKey) return +1;
+            return 0;
+        });
 
-        // use JSON strings as album keys to uniquely identify combinations of album + album artists
-        // group scrobbles by album key
-        let scrobbleDataGroups = [...groupBy(allScrobbleData, s => JSON.stringify({
-            album_name: s.get('album_name') || '',
-            album_artist_name: s.get('album_artist_name') || ''
-        }))];
+        // when the edit dialog was initiated from an album or album track, put that album first in the list
+        if (urlType === 'album' || getUrlType(document.URL) === 'album') {
+            // grab the current album name and artist name from the DOM
+            const album_name = (urlType === 'album' && row
+                                ? row.querySelector('.chartlist-name')
+                                : document.querySelector('.library-header-title')).textContent.trim();
+            const album_artist_name = (urlType === 'album' && row
+                                       ? row.querySelector('.chartlist-artist') || document.querySelector('.library-header-title, .library-header-crumb')
+                                       : document.querySelector('.text-colour-link')).textContent.trim();
+            currentAlbumKey = JSON.stringify({ album_name, album_artist_name });
 
-        // sort groups by the amount of scrobbles
-        scrobbleDataGroups = scrobbleDataGroups.sort(([_key1, values1], [_key2, values2]) => values2.length - values1.length);
-
-        // when editing multiple albums album, show an album selection dialog first
-        if (scrobbleDataGroups.length >= 2) {
-            const noAlbumKey = JSON.stringify({ album_name: '', album_artist_name: '' });
-            let currentAlbumKey = undefined;
-
-            // put the "No Album" album first
+            // put the current album first
             scrobbleDataGroups = scrobbleDataGroups.sort(([key1], [key2]) => {
+                if (key1 === currentAlbumKey) return -1;
+                if (key2 === currentAlbumKey) return +1;
                 if (key1 === noAlbumKey) return -1;
                 if (key2 === noAlbumKey) return +1;
                 return 0;
             });
+        }
 
-            // when the edit dialog was initiated from an album or album track, put that album first in the list
-            if (urlType === 'album' || getUrlType(document.URL) === 'album') {
-                // grab the current album name and artist name from the DOM
-                const album_name = (urlType === 'album' && row
-                    ? row.querySelector('.chartlist-name')
-                    : document.querySelector('.library-header-title')).textContent.trim();
-                const album_artist_name = (urlType === 'album' && row
-                    ? row.querySelector('.chartlist-artist') || document.querySelector('.library-header-title, .library-header-crumb')
-                    : document.querySelector('.text-colour-link')).textContent.trim();
-                currentAlbumKey = JSON.stringify({ album_name, album_artist_name });
-
-                // put the current album first
-                scrobbleDataGroups = scrobbleDataGroups.sort(([key1], [key2]) => {
-                    if (key1 === currentAlbumKey) return -1;
-                    if (key2 === currentAlbumKey) return +1;
-                    if (key1 === noAlbumKey) return -1;
-                    if (key2 === noAlbumKey) return +1;
-                    return 0;
-                });
-            }
-
-            const body = document.createElement('div');
-            body.innerHTML = `
+        const body = document.createElement('div');
+        body.innerHTML = `
                 <div class="form-disclaimer">
                     <div class="alert alert-info">
                         Scrobbles from this ${urlType} are spread out across multiple albums.
@@ -285,11 +303,11 @@ function getEditScrobbleForm(url, row) {
                 </div>
                 <ul class="${namespace}-list">
                     ${scrobbleDataGroups.map(([key, scrobbleData], index) => {
-                        const firstScrobbleData = scrobbleData[0];
-                        const album_name = firstScrobbleData.get('album_name');
-                        const artist_name = firstScrobbleData.get('album_artist_name') || firstScrobbleData.get('artist_name');
+            const firstScrobbleData = scrobbleData[0];
+            const album_name = firstScrobbleData.get('album_name');
+            const artist_name = firstScrobbleData.get('album_artist_name') || firstScrobbleData.get('artist_name');
 
-                        return `
+            return `
                             <li>
                                 <div class="checkbox">
                                     <label>
@@ -306,95 +324,58 @@ function getEditScrobbleForm(url, row) {
                                     </label>
                                 </div>
                             </li>`;
-                    }).join('')}
+        }).join('')}
                 </ul>`;
 
-            const checkboxes = body.querySelectorAll('input[type="checkbox"]');
+        const checkboxes = body.querySelectorAll('input[type="checkbox"]');
 
-            body.querySelector(`#${namespace}-select-all`).addEventListener('click', () => {
-                for (const checkbox of checkboxes) {
-                    checkbox.checked = true;
-                }
-            });
-
-            body.querySelector(`#${namespace}-deselect-all`).addEventListener('click', () => {
-                for (const checkbox of checkboxes) {
-                    checkbox.checked = false;
-                }
-            });
-
-            let formData;
-            try {
-                formData = await prompt('Select Albums To Edit', body);
-            } catch (error) {
-                return; // user canceled the album selection dialog
+        body.querySelector(`#${namespace}-select-all`).addEventListener('click', () => {
+            for (const checkbox of checkboxes) {
+                checkbox.checked = true;
             }
+        });
 
-            const selectedAlbumKeys = formData.getAll('key');
+        body.querySelector(`#${namespace}-deselect-all`).addEventListener('click', () => {
+            for (const checkbox of checkboxes) {
+                checkbox.checked = false;
+            }
+        });
 
-            scrobbleData = flatten(scrobbleDataGroups
-                .filter(([key]) => selectedAlbumKeys.includes(key))
-                .map(([_, values]) => values));
+        let formData;
+        try {
+            formData = await prompt('Select Albums To Edit', body);
+        } catch (error) {
+            return; // user canceled the album selection dialog
         }
 
-        if (scrobbleData.length === 0) {
-            alert(`Last.fm reports you haven't listened to this ${urlType}.`);
-            return;
-        }
+        const selectedAlbumKeys = formData.getAll('key');
 
-        // use the first scrobble to trick Last.fm into fetching the Edit Scrobble modal
-        applyFormData(form, scrobbleData[0]);
-        submit = true;
-        button.click();
-    });
+        scrobbleData = flatten(scrobbleDataGroups
+                               .filter(([key]) => selectedAlbumKeys.includes(key))
+                               .map(([_, values]) => values));
+    }
+
+    if (scrobbleData.length === 0) {
+        alert(`Last.fm reports you haven't listened to this ${urlType}.`);
+        return;
+    }
+
+    // use the first scrobble to trick Last.fm into fetching the Edit Scrobble modal
+    applyFormData(form, scrobbleData[0]);
+    submit = true;
+    button.click();
 
     return form;
 }
 
-// shows a form dialog and resolves it's promise on submit
-function prompt(title, body) {
-    return new Promise((resolve, reject) => {
-        const form = document.createElement('form');
-        form.className = 'form-horizontal';
-
-        if (body instanceof Node) {
-            form.insertAdjacentElement('beforeend', body);
-        } else {
-            form.insertAdjacentHTML('beforeend', body);
-        }
-
-        form.insertAdjacentHTML('beforeend', `
-            <div class="form-group form-group--submit">
-                <div class="form-submit">
-                    <button type="reset" class="btn-secondary">Cancel</button>
-                    <button type="submit" class="btn-primary">
-                        <span class="btn-inner">
-                            OK
-                        </span>
-                    </button>
-                </div>
-            </div>`);
-
-        const content = document.createElement('div');
-        content.className = 'content-form';
-        content.appendChild(form);
-
-        const modal = createModal(title, content, {
-            dismissible: true,
-            events: {
-                hide: reject
-            }
-        });
-
-        form.addEventListener('reset', modal.hide);
-        form.addEventListener('submit', (event) => {
-            event.preventDefault();
-            resolve(new FormData(form));
-            modal.hide();
-        });
-
-        modal.show();
-    });
+function getUrlType(url) {
+    if (albumRegExp.test(url)) {
+        return 'album';
+    } else if (artistRegExp.test(url)) {
+        return 'artist';
+    } else {
+        return 'track';
+    }
 }
 
 function createModal(title, body, options) {
@@ -484,10 +465,11 @@ function createLoadingModal(title, options) {
                 progress.textContent = `${modal.steps.filter(s => s.completed).length} / ${modal.steps.length}`;
                 break;
 
-            case 'percentage':
+            case 'percentage':{
                 const completionRatio = getCompletionRatio(modal.steps);
                 progress.textContent = Math.floor(completionRatio * 100) + '%';
                 break;
+            }
         }
     };
 
@@ -505,11 +487,11 @@ function getCompletionRatio(steps) {
     return completedWeight / totalWeight;
 }
 
-// this is a recursive function that browses pages of artists, albums and tracks to gather scrobbles
-async function fetchScrobbleData(url, loadingModal, parentStep) {
+async function fetchScrobbleData(url, method, loadingModal, parentStep) {
     if (!parentStep) parentStep = loadingModal;
 
-    // remove "?date_preset=LAST_365_DAYS", etc.
+    /*
+    //remove "?date_preset=LAST_365_DAYS", etc.
     const indexOfQuery = url.indexOf('?');
     if (indexOfQuery !== -1) {
         url = url.substr(0, indexOfQuery);
@@ -518,21 +500,24 @@ async function fetchScrobbleData(url, loadingModal, parentStep) {
     if (getUrlType(url) === 'artist') {
         url += '/+tracks'; // skip artist overview and go straight to the tracks
     }
+    */
 
-    const documentsToFetch = [fetchHTMLDocument(url)];
+    const documentsToFetch = [fetchJSON(url)];
     const firstDocument = await documentsToFetch[0];
-    const paginationList = firstDocument.querySelector('.pagination-list');
+    const pageCount = parseInt(firstDocument[method.range]['@attr'].totalPages);
 
-    if (paginationList) {
-        const pageCount = parseInt(paginationList.children[paginationList.children.length - 2].textContent.trim(), 10);
-        const pageNumbersToFetch = [...Array(pageCount - 1).keys()].map(i => i + 2);
-        documentsToFetch.push(...pageNumbersToFetch.map(n => fetchHTMLDocument(`${url}?page=${n}`)));
-    }
+    const pageNumbersToFetch = [...Array(pageCount - 1).keys()].map(i => i + 2);
+    documentsToFetch.push(...pageNumbersToFetch.map(n => fetchJSON(`${url}&page=${n}`)));
 
     let scrobbleData = await forEachParallel(loadingModal, parentStep, documentsToFetch, async (documentToFetch, step) => {
         const fetchedDocument = await documentToFetch;
 
-        const table = fetchedDocument.querySelector('table.chartlist');
+        //Needs to fix this such that it also applies for albums
+        const table = fetchedDocument[method.range][method.type];
+        //console.log(table);
+        const sortedTable = await JSONsorter(table,method);
+        //console.log(sortedTable);
+
         if (!table) {
             // sometimes a missing chartlist is expected, other times it indicates a failure
             if (fetchedDocument.body.textContent.includes('There was a problem loading your')) {
@@ -541,25 +526,32 @@ async function fetchScrobbleData(url, loadingModal, parentStep) {
             return [];
         }
 
-        const rows = [...table.tBodies[0].rows];
+        const rows = Array.prototype.slice.call(sortedTable);
+        //console.log(rows);
+        //const rows = [...table.tBodies[0].rows];
 
         // to display accurate loading percentages, tracks with more scrobbles will have more weight
         const weightFunc = row => {
-            const barValue = row.querySelector('.chartlist-count-bar-value');
+            const barValue = row.playcount;
+            //const barValue = row.querySelector('.chartlist-count-bar-value');
             if (barValue === null) return 1;
-            const scrobbleCount = parseInt(barValue.firstChild.textContent.trim().replace(/,/g, ''), 10);
-            return Math.ceil(scrobbleCount / 50); // 50 = items per page on Last.fm
+            const scrobbleCount = parseInt(barValue, 10);
+            return Math.ceil(scrobbleCount / 200); // 50 = items per page on Last.fm
         };
 
         return await forEachParallel(loadingModal, step, rows, async (row, step) => {
-            const link = row.querySelector('.chartlist-count-bar-link');
+            //console.log(row)
+
+            const link = row.url.replace("https://www.last.fm/",libraryURL)
+            //console.log(link)
             if (link) {
-                // recursive call to the current function
-                return await fetchScrobbleData(link.href, loadingModal, step);
+                //recursive call to the current function
+                return await fetchScrobbleData(link, loadingModal, step);
             }
 
             // no link indicates we're at the scrobble overview
             const form = row.querySelector('form[data-edit-scrobble]');
+            console.log(form);
             return new FormData(form);
         }, weightFunc);
     });
@@ -567,14 +559,40 @@ async function fetchScrobbleData(url, loadingModal, parentStep) {
     return scrobbleData;
 }
 
-function getUrlType(url) {
-    if (albumRegExp.test(url)) {
-        return 'album';
-    } else if (artistRegExp.test(url)) {
-        return 'artist';
-    } else {
-        return 'track';
+async function JSONsorter(doc,method){
+    const sortDoc = []
+    if (doc.length === 0){
+        return;
     }
+
+    for (let i = 0; i < doc.length; i++) {
+        let track = doc[i]
+
+        let trackName = track.name;
+        //let albumName = track.album['#text'];
+
+        let cleanTrackName = filter.filterField(method.type, trackName).trim();
+        //let cleanAlbumName = filter.filterField('album', albumName);
+
+        if (trackName != cleanTrackName) {
+            console.log(trackName, ' ---> ', cleanTrackName);
+            //console.log({test:cleanTrackName})
+            track.cleanName = cleanTrackName;
+            sortDoc.push(track);
+            //console.log(albumName, ' ---> ', cleanAlbumName);
+            /*
+            let res = await lastfm.fixScrobble(track, cleanTrackName, cleanAlbumName);
+            if (res) {
+                console.log('Fixed.');
+            } else {
+                console.log('Failed to fix.');
+            }
+            */
+        }
+    }
+    //console.log(sortDoc);
+
+    return sortDoc
 }
 
 async function fetchHTMLDocument(url) {
@@ -594,6 +612,27 @@ async function fetchHTMLDocument(url) {
             if (doc.querySelector('table.chartlist') || i === 4) {
                 return doc;
             }
+        }
+    }
+
+    abort();
+}
+
+async function fetchJSON(url) {
+    // retry 5 times with exponential timeout
+    for (let i = 0; i < 5; i++) {
+        if (i !== 0) {
+            // wait 2 seconds, then 4 seconds, then 8, finally 16 (30 seconds total)
+            await new Promise(resolve => setTimeout(resolve, Math.pow(2, i)));
+        }
+
+        const response = await fetch(url);
+
+        if (response.ok) {
+            const json = await response.text();
+            console.log(json);
+            const doc = JSON.parse(json);
+            return doc;
         }
     }
 
@@ -648,292 +687,6 @@ function flatten(array) {
     }, []);
 }
 
-function applyFormData(form, formData) {
-    for (const [name, value] of formData) {
-        const input = form.elements[name];
-        input.value = value;
-    }
-}
-
-// augments the default Edit Scrobble form to include new features
-async function augmentEditScrobbleForm(urlType, scrobbleData) {
-    const wrapper = await observeChildList(document.body, '.popup_wrapper');
-
-    // wait 1 frame
-    await new Promise(resolve => setTimeout(() => { resolve(); }));
-
-    const popup = wrapper.querySelector('.popup_content');
-    const title = popup.querySelector('.modal-title');
-    const form = popup.querySelector('form[action$="/library/edit?edited-variation=library-track-scrobble"]');
-
-    title.textContent = `Edit ${urlType[0].toUpperCase() + urlType.slice(1)} Scrobbles`;
-
-    // remove traces of the first scrobble that was used to initialize the form
-    form.removeChild(form.querySelector('.form-group--timestamp'));
-    form.removeChild(form.elements['track_name_original']);
-    form.removeChild(form.elements['artist_name_original']);
-    form.removeChild(form.elements['album_name_original']);
-    form.removeChild(form.elements['album_artist_name_original']);
-
-    const track_name_input = form.elements['track_name'];
-    const artist_name_input = form.elements['artist_name'];
-    const album_name_input = form.elements['album_name'];
-    const album_artist_name_input = form.elements['album_artist_name'];
-
-    augmentInput(urlType, scrobbleData, popup, track_name_input, 'tracks');
-    augmentInput(urlType, scrobbleData, popup, artist_name_input, 'artists');
-    augmentInput(urlType, scrobbleData, popup, album_name_input, 'albums');
-    augmentInput(urlType, scrobbleData, popup, album_artist_name_input, 'album artists');
-
-    // keep album artist name in sync
-    let previousValue = artist_name_input.value;
-    artist_name_input.addEventListener('input', () => {
-        if (album_artist_name_input.value === previousValue) {
-            album_artist_name_input.value = artist_name_input.value;
-            album_artist_name_input.dispatchEvent(new Event('input'));
-        }
-        previousValue = artist_name_input.value;
-    });
-
-    if (album_artist_name_input.placeholder === 'Mixed') {
-        const template = document.createElement('template');
-        template.innerHTML = `
-            <div class="form-group-success">
-                <div class="alert alert-info">
-                    <p>Matching album artists will be kept in sync.</p>
-                </div>
-            </div>`;
-        artist_name_input.parentNode.insertBefore(template.content, artist_name_input.nextElementChild);
-    }
-
-    // replace the "Edit all" checkbox with one that cannot be disabled
-    let editAllFormGroup = form.querySelector('.form-group--edit_all');
-    if (editAllFormGroup) form.removeChild(editAllFormGroup);
-
-    const summary = `${urlType !== 'artist' ? 'artist, ' : ''}${urlType !== 'track' ? 'track, ' : ''}${urlType !== 'album' ? 'album, ' : ''}and album artist`;
-    const editAllFormGroupTemplate = document.createElement('template');
-    editAllFormGroupTemplate.innerHTML = `
-        <div class="form-group form-group--edit_all js-form-group">
-            <label for="id_edit_all" class="control-label">Bulk edit</label>
-            <div class="js-form-group-controls form-group-controls">
-                <div class="checkbox">
-                    <label for="id_edit_all">
-                        <input id="id_edit_all" type="checkbox" checked disabled>
-                        <input name="edit_all" type="hidden" value="true">
-                        Edit all
-                        <span class="abbr" title="You have scrobbled any combination of ${summary} ${scrobbleData.length} times">
-                            ${scrobbleData.length} scrobbles
-                        </span>
-                        of this ${urlType}
-                    </label>
-                </div>
-            </div>
-        </div>`;
-
-    editAllFormGroup = editAllFormGroupTemplate.content.cloneNode(true);
-    form.insertBefore(editAllFormGroup, form.lastElementChild);
-
-    // each exact track, artist, album and album artist combination is considered a distinct scrobble
-    const distinctGroups = groupBy(scrobbleData, s => JSON.stringify({
-        track_name: s.get('track_name'),
-        artist_name: s.get('artist_name'),
-        album_name: s.get('album_name') || '',
-        album_artist_name: s.get('album_artist_name') || ''
-    }));
-
-    const distinctScrobbleData = [...distinctGroups].map(([name, values]) => values[0]);
-
-    const submitButton = form.querySelector('button[type="submit"]');
-    submitButton.addEventListener('click', async event => {
-        event.preventDefault();
-
-        for (const element of form.elements) {
-            if (element.dataset.confirm && element.placeholder !== 'Mixed') {
-                if (confirm(element.dataset.confirm)) {
-                    delete element.dataset.confirm; // don't confirm again when resubmitting
-                } else {
-                    return; // stop submit
-                }
-            }
-        }
-
-        const formData = new FormData(form);
-        const formDataToSubmit = [];
-
-        const track_name = getMixedInputValue(track_name_input);
-        const artist_name = getMixedInputValue(artist_name_input);
-        const album_name = getMixedInputValue(album_name_input);
-        const album_artist_name = getMixedInputValue(album_artist_name_input);
-
-        for (const originalData of distinctScrobbleData) {
-            const track_name_original = originalData.get('track_name');
-            const artist_name_original = originalData.get('artist_name');
-            const album_name_original = originalData.get('album_name') || '';
-            const album_artist_name_original = originalData.get('album_artist_name') || '';
-
-            // if the album artist field is Mixed, use the old and new artist names to keep the album artist in sync
-            const album_artist_name_sync = album_artist_name_input.placeholder === 'Mixed' && distinctScrobbleData.some(s => s.get('artist_name') === album_artist_name_original)
-                ? artist_name
-                : album_artist_name;
-
-            // check if anything changed compared to the original track, artist, album and album artist combination
-            if (track_name             !== null && track_name             !== track_name_original  ||
-                artist_name            !== null && artist_name            !== artist_name_original ||
-                album_name             !== null && album_name             !== album_name_original  ||
-                album_artist_name_sync !== null && album_artist_name_sync !== album_artist_name_original) {
-
-                const clonedFormData = cloneFormData(formData);
-
-                // Last.fm expects a timestamp
-                clonedFormData.set('timestamp', originalData.get('timestamp'));
-
-                // populate the *_original fields to instruct Last.fm which scrobbles need to be edited
-
-                clonedFormData.set('track_name_original', track_name_original);
-                if (track_name === null) {
-                    clonedFormData.set('track_name', track_name_original);
-                }
-
-                clonedFormData.set('artist_name_original', artist_name_original);
-                if (artist_name === null) {
-                    clonedFormData.set('artist_name', artist_name_original);
-                }
-
-                clonedFormData.set('album_name_original', album_name_original);
-                if (album_name === null) {
-                    clonedFormData.set('album_name', album_name_original);
-                }
-
-                clonedFormData.set('album_artist_name_original', album_artist_name_original);
-                if (album_artist_name_sync === null) {
-                    clonedFormData.set('album_artist_name', album_artist_name_original);
-                } else {
-                    clonedFormData.set('album_artist_name', album_artist_name_sync);
-                }
-
-                formDataToSubmit.push(clonedFormData);
-            }
-        }
-
-        if (formDataToSubmit.length === 0) {
-            alert('Your edit doesn\'t contain any real changes.'); // TODO: pretty validation messages
-            return;
-        }
-
-        // hide the Edit Scrobble form
-        const cancelButton = form.querySelector('button.js-close');
-        cancelButton.click();
-
-        const loadingModal = createLoadingModal('Saving Edits...', { display: 'count' });
-        const parentStep = loadingModal;
-
-        // run edits in series, inconsistencies will arise if you use a parallel loop
-        await forEach(loadingModal, parentStep, formDataToSubmit, async formData => {
-            // Edge does not support passing formData into URLSearchParams() constructor
-            const body = new URLSearchParams();
-            for (const [name, value] of formData) {
-                body.append(name, value);
-            }
-
-            const response = await fetch(form.action, { method: 'POST', body: body });
-            const html = await response.text();
-
-            // use DOMParser to check the response for alerts
-            const placeholder = domParser.parseFromString(html, 'text/html');
-
-            for (const message of placeholder.querySelectorAll('.alert-danger')) {
-                alert(message.textContent.trim()); // TODO: pretty validation messages
-            }
-        });
-
-        // Last.fm sometimes displays old data when reloading too fast, so wait 1 second
-        setTimeout(() => { window.location.reload(); }, 1000);
-    });
-}
-
-// helper function that completes when a matching element gets appended
-function observeChildList(target, selector) {
-    return new Promise(resolve => {
-        const observer = new MutationObserver(mutations => {
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (node.matches(selector)) {
-                        observer.disconnect();
-                        resolve(node);
-                        return;
-                    }
-                }
-            }
-        });
-
-        observer.observe(target, { childList: true });
-    });
-}
-
-// turns a normal input into an input that supports the "Mixed" state
-function augmentInput(urlType, scrobbleData, popup, input, plural) {
-    const groups = [...groupBy(scrobbleData, s => s.get(input.name))].sort((a, b) => b[1].length - a[1].length);
-
-    if (groups.length >= 2) {
-        // display the "Mixed" placeholder when there are two or more possible values
-        input.value = '';
-        input.placeholder = 'Mixed';
-
-        const tab = '\xa0'.repeat(8); // 8 non-breaking spaces
-
-        const abbr = document.createElement('span');
-        abbr.className = `abbr ${namespace}-abbr`;
-        abbr.textContent = `${groups.length} ${plural}`;
-        abbr.title = groups.map(([key, values]) => `${values.length}x${tab}${key || ''}`).join('\n');
-        input.parentNode.insertBefore(abbr, input.nextElementChild);
-
-        input.dataset.confirm = `You are about to merge scrobbles for ${groups.length} ${plural}. This cannot be undone. Would you like to continue?`;
-
-        // datalist: a native HTML5 autocomplete feature
-        const datalist = document.createElement('datalist');
-        datalist.id = `${namespace}-${popup.id}-${input.name}-datalist`;
-
-        for (const [key] of groups) {
-            const option = document.createElement('option');
-            option.value = key || '';
-            datalist.appendChild(option);
-        }
-
-        input.autocomplete = 'off';
-        input.setAttribute('list', datalist.id);
-        input.parentNode.insertBefore(datalist, input.nextElementChild);
-    }
-
-    // display green color when field was edited, red if it's not allowed to be empty
-    const formGroup = input.closest('.form-group');
-    const defaultValue = input.value;
-
-    input.addEventListener('input', () => {
-        input.placeholder = ''; // removes "Mixed" state
-        refreshFormGroupState();
-    });
-
-    input.addEventListener('keydown', event => {
-        if (event.keyCode === 8 || event.keyCode === 46) { // backspace or delete
-            input.placeholder = ''; // removes "Mixed" state
-            refreshFormGroupState();
-        }
-    });
-
-    function refreshFormGroupState() {
-        formGroup.classList.remove('has-error');
-        formGroup.classList.remove('has-success');
-
-        if (input.value !== defaultValue || groups.length >= 2 && input.placeholder === '') {
-            if (input.value === '' && (input.name === 'track_name' || input.name === 'artist_name')) {
-                formGroup.classList.add('has-error');
-            } else {
-                formGroup.classList.add('has-success');
-            }
-        }
-    }
-}
-
 function groupBy(array, keyFunc) {
     const map = new Map();
 
@@ -963,3 +716,31 @@ function cloneFormData(formData) {
 
     return clonedFormData;
 }
+
+// helper function that completes when a matching element gets appended
+function observeChildList(target, selector) {
+    return new Promise(resolve => {
+        const observer = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.matches(selector)) {
+                        observer.disconnect();
+                        resolve(node);
+                        return;
+                    }
+                }
+            }
+        });
+
+        observer.observe(target, { childList: true });
+    });
+}
+
+function applyFormData(form, formData) {
+    for (const [name, value] of formData) {
+        const input = form.elements[name];
+        input.value = value;
+    }
+}
+
+
